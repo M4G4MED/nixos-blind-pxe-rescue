@@ -1,0 +1,23 @@
+set default="0"
+set timeout=5
+set saved_entry="0"
+menuentry 'NixOS (Stage-1 Bootloader)' {
+	set root='hd0,gpt1'
+}
+submenu 'NixOS - All configurations' {
+	menuentry 'NixOS, group: core, Generation 123 2026-10-26 07:55 ' {
+		search --no-floppy --set=root --label ESP
+		linux /kernels/g6bz root=UUID=x crashkernel=256M
+		initrd /kernels/g6ir
+	}
+	menuentry 'NixOS, group: core, Generation 122 2026-10-26 06:25 ' {
+		search --no-floppy --set=root --label ESP
+		linux /kernels/g5bz root=UUID=x
+		initrd /kernels/g5ir
+	}
+	menuentry 'NixOS, group: core, Generation 121 2026-10-25 20:10 ' {
+		search --no-floppy --set=root --label ESP
+		linux /kernels/g4bz root=UUID=x
+		initrd /kernels/g4ir
+	}
+}

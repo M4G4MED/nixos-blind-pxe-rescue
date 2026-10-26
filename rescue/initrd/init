@@ -1,0 +1,110 @@
+#!/bin/sh
+# TARGET rescue v8 - step telemetry via HTTP path (darkhttpd logs paths, strips queries)
+B=http://192.0.2.10:8092/t
+step() { wget -q -O /dev/null "$B/$1" 2>/dev/null; }
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+[ -e /dev/console ] || mknod /dev/console c 5 1
+[ -e /dev/kmsg ] || mknod /dev/kmsg c 1 11 2>/dev/null
+exec > /dev/kmsg 2>&1 || true
+echo "RESCUE-V8 START"
+step 01start
+
+insmod /modules/auxiliary.ko 2>/dev/null
+for m in $(cat /modules/.order/LOAD); do insmod /modules/$m 2>/dev/null; done
+step 02modules
+
+# poll for NVMe namespace (real drive enumerates slowly after hard reset)
+i=0; while [ $i -lt 30 ]; do
+  ls /sys/class/block/nvme*n1p1 >/dev/null 2>&1 && break
+  sleep 1; i=$((i+1))
+done
+step wait-$i
+
+ESP=""
+mkdir -p /esp
+for p in /dev/nvme0n1p1 /dev/nvme1n1p1 /dev/sda1; do
+  [ -e "$p" ] || continue
+  timeout 10 mount -t vfat "$p" /esp 2>/dev/null && ESP=$p && break
+done
+echo "RESCUE-V8 esp=$ESP"
+step esp-$ESP
+if [ -n "$ESP" ] && [ -f /esp/rescue.done ] && grep -q OK /esp/rescue.done; then
+  echo "RESCUE: done marker, booting disk"
+  step 06skip-bootdisk
+  umount /esp; sleep 3; echo b > /proc/sysrq-trigger; reboot -f; sleep 600
+fi
+[ -n "$ESP" ] && { echo "V8-RUN $(date)" >> /esp/rescue.log; sync; }
+
+# network
+IF=""
+i=0; while [ $i -lt 16 ]; do
+  IF=$(ls /sys/class/net 2>/dev/null | grep -v lo | head -1)
+  [ -n "$IF" ] && break
+  sleep 2; i=$((i+1))
+done
+[ -n "$IF" ] || IF=eth0
+if [ -e /sys/class/net/$IF ]; then
+  ip link set $IF up 2>/dev/null
+  ip addr add 192.0.2.20/24 dev $IF 2>/dev/null
+  ip route add default via 192.0.2.1 2>/dev/null
+  arp -s 192.0.2.10 REPLACE-PXE-SERVER-MAC 2>/dev/null
+  insmod /modules/netconsole.ko netconsole=6665@192.0.2.20/$IF,8091@192.0.2.10/ 2>/dev/null
+fi
+step 07net-$IF
+
+mkdir -p /root
+ROOT=""
+i=0; while [ $i -lt 15 ]; do
+  for d in /dev/nvme0n1p2 /dev/nvme1n1p2 /dev/sda2; do
+    [ -e "$d" ] || continue
+    F=$(dd if=$d bs=1 skip=65568 count=16 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [ "$F" = "REPLACE-BTRFS-FSID-HEX" ] && ROOT=$d && break
+  done
+  [ -n "$ROOT" ] && break
+  sleep 1; i=$((i+1))
+done
+echo "RESCUE-V8 root=$ROOT"
+step 08root-$ROOT
+if [ -n "$ROOT" ]; then
+  timeout 15 mount -t btrfs -o subvol=/@ "$ROOT" /root 2>/dev/null && step 09btrfs-mount
+  if [ -d /root/etc/nixos ]; then
+    cp /crash-module.nix /root/etc/nixos/crash-ssd.nix
+    sed -i 's/crash-ssd.enable = true;/crash-ssd.enable = false;/' /root/etc/nixos/configuration.nix
+    sync
+    step 10module-fixed
+    echo "V8 module fixed+disabled" >> /esp/rescue.log 2>/dev/null
+  fi
+fi
+
+G=""
+[ -n "$ESP" ] && G=$(find /esp -name grub.cfg 2>/dev/null | head -1)
+if [ -n "$G" ]; then
+  cp "$G" "$G.rescuebak" 2>/dev/null
+  LOG=/esp/rescue.log
+  if timeout 60 sh /fix-grub.sh /esp /root "$G" >> $LOG 2>&1; then
+    echo "V8-RESULT=OK" >> $LOG
+    echo OK > /esp/rescue.done
+    sync
+    step 13result-ok
+  else
+    echo "V8-RESULT=FAIL" >> $LOG
+    sync
+    step 14result-fail
+  fi
+  # exfil the fixer log (FG lines show exactly what failed)
+  ESC=$(tr -c 'a-zA-Z0-9._-' '_' < $LOG | tr -s '_' | cut -c1-180)
+  wget -q -O /dev/null "http://192.0.2.10:8092/t/log-$ESC" 2>/dev/null
+else
+  step 12nogrub
+fi
+
+step 15rebooting
+[ -f /esp/rescue.log ] && cat /esp/rescue.log
+umount /esp 2>/dev/null
+sleep 5
+echo b > /proc/sysrq-trigger
+reboot -f
+sleep 600

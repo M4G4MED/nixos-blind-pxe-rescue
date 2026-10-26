@@ -1,0 +1,5 @@
+#!ipxe
+echo == TARGET rescue ==
+kernel http://192.0.2.10:8092/rescue-bzImage initrd=rescue-initrd.cpio.zst init=/init loglevel=7 panic=60 console=ttyS0,115200 console=tty0
+initrd http://192.0.2.10:8092/rescue-initrd.cpio.zst
+boot
